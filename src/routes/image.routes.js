@@ -11,7 +11,7 @@ import { upload } from '../middlewares/upload.middleware.js';
 import { validateObjectId } from '../middlewares/validateObjectId.middleware.js';
 
 /**
- * TODO: Define image routes
+ * Image Routes Definition
  *
  * POST   /                  → uploadImage (use upload.single('image') middleware)
  * GET    /                  → listImages
@@ -23,6 +23,18 @@ import { validateObjectId } from '../middlewares/validateObjectId.middleware.js'
 
 const router = Router();
 
-// Your routes here
+// Base collection endpoints
+router.route('/')
+  .post(upload.single('image'), uploadImage)
+  .get(listImages);
+
+// Individual resource metadata and removal endpoints
+router.route('/:id')
+  .get(validateObjectId, getImage)
+  .delete(validateObjectId, deleteImage);
+
+// Binary file retrieval stream endpoints
+router.get('/:id/download', validateObjectId, downloadImage);
+router.get('/:id/thumbnail', validateObjectId, downloadThumbnail);
 
 export default router;

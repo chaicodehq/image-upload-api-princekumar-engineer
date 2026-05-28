@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import mongoose from 'mongoose';
 import { fileURLToPath } from 'url';
-import { Image } from '../models/image.model.js';
+import Image from '../models/image.model.js';
 import { generateThumbnail, getImageDimensions } from '../utils/thumbnail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -20,12 +21,48 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  */
 export async function uploadImage(req, res, next) {
   try {
-    // Your code here
+    if (req.fileValidationError) {
+      return res.status(400).json({
+        error: { message: req.fileValidationError },
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        error: { message: 'No file uploaded' },
+      });
+    }
+
+    const { filename, originalname, mimetype, size, path: filepath } = req.file;
+
+    const { width, height } = await getImageDimensions(filepath);
+    const thumbnailFilename = await generateThumbnail(filename);
+
+    const description = req.body.description || '';
+    const tags = req.body.tags
+      ? req.body.tags
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter(Boolean)
+      : [];
+
+    const image = await Image.create({
+      originalName: originalname,
+      filename,
+      mimetype,
+      size,
+      width,
+      height,
+      thumbnailFilename,
+      description,
+      tags,
+    });
+
+    return res.status(201).json(image);
   } catch (error) {
     next(error);
   }
 }
-
 /**
  * TODO: List images with pagination and filtering
  *
@@ -55,14 +92,61 @@ export async function uploadImage(req, res, next) {
  *    - data: images array
  *    - meta: { total, page, limit, pages, totalSize }
  */
+/**
+ * List images with pagination and filtering
+ */
 export async function listImages(req, res, next) {
   try {
-    // Your code here
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 10, 50));
+
+    const search = req.query.search;
+    const mimetype = req.query.mimetype;
+    const sortBy = req.query.sortBy || 'uploadDate';
+    const sortOrder = req.query.sortOrder || 'desc';
+
+    const query = {};
+
+    if (mimetype) {
+      query.mimetype = mimetype;
+    }
+
+    if (search) {
+      query.$or = [
+        { originalName: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+    const sortParams = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+
+    const [images, total, sizeAgg] = await Promise.all([
+      Image.find(query).sort(sortParams).skip(skip).limit(limit),
+      Image.countDocuments(query),
+      Image.aggregate([
+        { $match: query },
+        { $group: { _id: null, totalSize: { $sum: '$size' } } },
+      ])
+    ]);
+
+    const pages = Math.ceil(total / limit);
+    const totalSize = sizeAgg[0]?.totalSize || 0;
+
+    return res.status(200).json({
+      data: images,
+      meta: {
+        total,
+        page,
+        limit,
+        pages,
+        totalSize,
+      },
+    });
   } catch (error) {
     next(error);
   }
 }
-
 /**
  * TODO: Get image metadata by ID
  *
@@ -70,14 +154,30 @@ export async function listImages(req, res, next) {
  * 2. If not found: return 404 "Image not found"
  * 3. Return 200 with image metadata
  */
+/**
+ * Get image metadata by ID
+ */
 export async function getImage(req, res, next) {
   try {
-    // Your code here
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        error: { message: 'Invalid image ID format' },
+      });
+    }
+
+    const image = await Image.findById(req.params.id);
+
+    if (!image) {
+      return res.status(404).json({
+        error: { message: 'Image not found' },
+      });
+    }
+
+    return res.status(200).json(image);
   } catch (error) {
     next(error);
   }
 }
-
 /**
  * TODO: Download original image
  *
@@ -91,14 +191,42 @@ export async function getImage(req, res, next) {
  *    - Content-Disposition: attachment; filename="originalName"
  * 7. Send file using res.sendFile(filepath)
  */
+/**
+ * Download original image
+ */
 export async function downloadImage(req, res, next) {
   try {
-    // Your code here
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        error: { message: 'Invalid image ID format' },
+      });
+    }
+
+    const image = await Image.findById(req.params.id);
+
+    if (!image) {
+      return res.status(404).json({
+        error: { message: 'Image not found' },
+      });
+    }
+
+    // Fixed: Pull filename directly out of the extracted image model record
+    const filepath = path.resolve(__dirname, '../../uploads', image.filename);
+
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({
+        error: { message: 'File not found on disk' },
+      });
+    }
+
+    res.setHeader('Content-Type', image.mimetype);
+    res.setHeader('Content-Disposition', `attachment; filename="${image.originalName}"`);
+
+    return res.sendFile(filepath);
   } catch (error) {
     next(error);
   }
 }
-
 /**
  * TODO: Download thumbnail
  *
@@ -111,14 +239,39 @@ export async function downloadImage(req, res, next) {
  *    - Content-Type: image/jpeg (thumbnails are always JPEG)
  * 7. Send file using res.sendFile(thumbnailPath)
  */
+/**
+ * Download thumbnail
+ */
 export async function downloadThumbnail(req, res, next) {
   try {
-    // Your code here
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        error: { message: 'Invalid image ID format' },
+      });
+    }
+
+    const image = await Image.findById(req.params.id);
+
+    if (!image) {
+      return res.status(404).json({
+        error: { message: 'Image not found' },
+      });
+    }
+
+    const thumbnailPath = path.resolve(__dirname, '../../uploads/thumbnails', image.thumbnailFilename);
+
+    if (!fs.existsSync(thumbnailPath)) {
+      return res.status(404).json({
+        error: { message: 'File not found on disk' },
+      });
+    }
+
+    res.setHeader('Content-Type', 'image/jpeg');
+    return res.sendFile(thumbnailPath);
   } catch (error) {
     next(error);
   }
 }
-
 /**
  * TODO: Delete image
  *
@@ -129,9 +282,44 @@ export async function downloadThumbnail(req, res, next) {
  * 5. Delete metadata from database
  * 6. Return 204 (no content)
  */
+/**
+ * Delete image
+ */
 export async function deleteImage(req, res, next) {
   try {
-    // Your code here
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        error: { message: 'Invalid image ID format' },
+      });
+    }
+
+    const image = await Image.findById(req.params.id);
+
+    if (!image) {
+      return res.status(404).json({
+        error: { message: 'Image not found' },
+      });
+    }
+
+    // Fixed: Pull filename directly out of the extracted image model record
+    const filepath = path.resolve(__dirname, '../../uploads', image.filename);
+    const thumbnailPath = path.resolve(__dirname, '../../uploads/thumbnails', image.thumbnailFilename);
+
+    try {
+      await fs.promises.unlink(filepath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+
+    try {
+      await fs.promises.unlink(thumbnailPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+
+    await Image.findByIdAndDelete(req.params.id);
+
+    return res.status(204).end();
   } catch (error) {
     next(error);
   }
